@@ -17,6 +17,8 @@
 #![no_main]
 #![allow(async_fn_in_trait)]
 
+use core::sync::atomic::Ordering;
+
 use defmt::*;
 use defmt_rtt as _;
 use panic_probe as _;
@@ -36,15 +38,12 @@ mod dhcp;
 mod motor;
 mod web;
 
-use motor::StepperMotor;
+use motor::{Command, StepperMotor, BUSY, COMMANDS, POSITION};
 use web::run_web_server;
 
 const AP_SSID: &str = "ValveController";
 const AP_CHANNEL: u8 = 6;
 const AP_IP: [u8; 4] = [192, 168, 4, 1];
-
-/// Full valve travel in steps. Tune this to match the mechanics.
-const MAX_TRAVEL_STEPS: i32 = 20000;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
@@ -77,6 +76,29 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
 #[embassy_executor::task]
 async fn dhcp_task(stack: Stack<'static>, server: Ipv4Address) -> ! {
     dhcp::run_dhcp_server(stack, server).await
+}
+
+/// Owns the motor and runs one command at a time.
+///
+/// Keeping the move here (instead of inline in the web server) is what lets the
+/// HTTP handler answer immediately while the valve is still travelling, and
+/// isolates a long-running homing sweep from the rest of the firmware.
+#[embassy_executor::task]
+async fn motor_task(mut motor: StepperMotor<'static>, home_sensor: Input<'static>) {
+    loop {
+        let command = COMMANDS.wait().await;
+        BUSY.store(true, Ordering::Relaxed);
+
+        match command {
+            Command::Open => motor.open().await,
+            Command::Close => motor.close().await,
+            Command::Home => motor.home(&home_sensor).await,
+            Command::Jog(steps) => motor.jog(steps).await,
+        }
+
+        POSITION.store(motor.position(), Ordering::Relaxed);
+        BUSY.store(false, Ordering::Relaxed);
+    }
 }
 
 #[embassy_executor::main]
@@ -152,8 +174,8 @@ async fn main(spawner: Spawner) {
     let enable_pin = Output::new(p.PIN_4, Level::High);
     let home_sensor = Input::new(p.PIN_5, Pull::Up);
 
-    let mut motor = StepperMotor::new(step_pin, dir_pin, enable_pin);
-    motor.set_max_steps(MAX_TRAVEL_STEPS);
+    let motor = StepperMotor::new(step_pin, dir_pin, enable_pin);
+    spawner.spawn(unwrap!(motor_task(motor, home_sensor)));
 
-    run_web_server(stack, &mut motor, &home_sensor).await;
+    run_web_server(stack).await;
 }

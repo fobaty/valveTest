@@ -1,8 +1,41 @@
+use core::sync::atomic::{AtomicBool, AtomicI32};
+
 use embassy_rp::gpio::{Input, Output};
-use embassy_time::{Duration, Timer};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Instant, Timer};
+
+/// Full valve travel in steps. Tune this to match the mechanics.
+pub const MAX_TRAVEL_STEPS: i32 = 20000;
 
 /// Minimum STEP pulse width, in microseconds.
 const STEP_PULSE_US: u64 = 3;
+
+/// Safety budgets for homing. Without them a missing or stuck limit switch
+/// would spin the search loops forever and stall every other task.
+const HOME_BACKOFF_MAX: i32 = 4_000;
+const HOME_SEARCH_MAX: i32 = 30_000;
+const HOME_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Movement request handed from the web server to the motor task.
+#[derive(Clone, Copy)]
+pub enum Command {
+    Open,
+    Close,
+    Home,
+    Jog(i32),
+}
+
+/// Newest command waiting to be executed.
+///
+/// `Signal` holds a single slot, so a burst of button presses is coalesced
+/// instead of building a backlog of queued moves.
+pub static COMMANDS: Signal<CriticalSectionRawMutex, Command> = Signal::new();
+
+/// Motor state published for the web UI: written by the motor task, read by
+/// the web server at any time without borrowing the motor itself.
+pub static POSITION: AtomicI32 = AtomicI32::new(0);
+pub static BUSY: AtomicBool = AtomicBool::new(false);
 
 /// A step/dir stepper motor driven through an external driver.
 ///
@@ -24,7 +57,7 @@ impl<'d> StepperMotor<'d> {
             dir_pin,
             enable_pin,
             position: 0,
-            max_steps: 20000,
+            max_steps: MAX_TRAVEL_STEPS,
             step_delay_us: 300,
         };
         motor.disable();
@@ -39,23 +72,12 @@ impl<'d> StepperMotor<'d> {
         self.enable_pin.set_high();
     }
 
-    pub fn set_max_steps(&mut self, max_steps: i32) {
-        self.max_steps = max_steps;
-    }
-
     pub fn set_speed(&mut self, step_delay_us: u64) {
         self.step_delay_us = step_delay_us;
     }
 
     pub fn position(&self) -> i32 {
         self.position
-    }
-
-    pub fn percent(&self) -> f32 {
-        if self.max_steps <= 0 {
-            return 0.0;
-        }
-        (self.position as f32 / self.max_steps as f32 * 100.0).clamp(0.0, 100.0)
     }
 
     async fn pulse(&mut self) {
@@ -127,27 +149,47 @@ impl<'d> StepperMotor<'d> {
     ///
     /// The motor first backs off the switch if it is already pressed, then
     /// closes until the switch triggers and finally re-zeroes the counter.
+    ///
+    /// Both loops are bounded by a step budget and a wall-clock timeout: a
+    /// missing or stuck switch aborts the search instead of spinning forever
+    /// and wedging the task that owns the motor.
     pub async fn home(&mut self, sensor: &Input<'d>) {
+        let started = Instant::now();
+        let before = self.position;
         self.enable();
 
         // Back off if the switch is already active.
-        while sensor.is_low() {
+        let mut backoff = 0;
+        while sensor.is_low() && backoff < HOME_BACKOFF_MAX && started.elapsed() < HOME_TIMEOUT {
             self.dir_pin.set_high();
             self.pulse().await;
             self.position += 1;
+            backoff += 1;
         }
 
         // Approach the switch slowly for repeatability.
         let saved = self.step_delay_us;
-        self.set_speed(self.step_delay_us.max(800));
-        while sensor.is_high() {
+        self.set_speed(saved.max(800));
+        let mut search = 0;
+        while sensor.is_high() && search < HOME_SEARCH_MAX && started.elapsed() < HOME_TIMEOUT {
             self.dir_pin.set_low();
             self.pulse().await;
             self.position -= 1;
+            search += 1;
         }
         self.set_speed(saved);
 
-        self.position = 0;
+        if sensor.is_low() {
+            self.position = 0;
+        } else {
+            // The counter is now untrustworthy, but restoring it keeps it
+            // inside [0, max_steps] so open/close still behave.
+            log::warn!(
+                "homing aborted after {} steps: no edge on the limit switch (GP5)",
+                search
+            );
+            self.position = before.clamp(0, self.max_steps);
+        }
         self.disable();
     }
 }

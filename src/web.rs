@@ -1,21 +1,21 @@
 use core::fmt::Write;
+use core::sync::atomic::Ordering;
 
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
-use embassy_rp::gpio::Input;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write as _;
 
-use crate::motor::StepperMotor;
+use crate::motor::{self, Command, MAX_TRAVEL_STEPS};
 
 const PORT: u16 = 80;
 
-/// Serve the control web UI and handle movement commands.
-pub async fn run_web_server<'d>(
-    stack: Stack<'d>,
-    motor: &mut StepperMotor<'d>,
-    home_sensor: &Input<'d>,
-) -> ! {
+/// Serve the control web UI and dispatch movement commands.
+///
+/// Commands are only signalled to the motor task here; the actual move happens
+/// there, so this connection is answered immediately instead of staying open
+/// for the whole travel (which can take seconds).
+pub async fn run_web_server(stack: Stack<'_>) -> ! {
     let mut rx_buffer = [0u8; 1024];
     let mut tx_buffer = [0u8; 1024];
     let mut request = [0u8; 256];
@@ -34,9 +34,9 @@ pub async fn run_web_server<'d>(
             Err(_) => continue,
         };
 
-        handle_request(motor, home_sensor, &request[..n]).await;
+        handle_request(&request[..n]);
 
-        let body = render_index(motor);
+        let body = render_index();
         let _ = socket.write_all(body.as_bytes()).await;
         let _ = socket.flush().await;
 
@@ -45,16 +45,19 @@ pub async fn run_web_server<'d>(
     }
 }
 
-async fn handle_request<'a>(motor: &mut StepperMotor<'a>, home_sensor: &Input<'a>, request: &[u8]) {
+fn handle_request(request: &[u8]) {
     let path = request_path(request);
     log::info!("request: {}", path);
-    match path {
-        "/open" => motor.open().await,
-        "/close" => motor.close().await,
-        "/home" => motor.home(home_sensor).await,
-        "/jog-open" => motor.jog(200).await,
-        "/jog-close" => motor.jog(-200).await,
-        _ => {}
+    let command = match path {
+        "/open" => Some(Command::Open),
+        "/close" => Some(Command::Close),
+        "/home" => Some(Command::Home),
+        "/jog-open" => Some(Command::Jog(200)),
+        "/jog-close" => Some(Command::Jog(-200)),
+        _ => None,
+    };
+    if let Some(command) = command {
+        motor::COMMANDS.signal(command);
     }
 }
 
@@ -69,8 +72,23 @@ fn request_path(request: &[u8]) -> &str {
     core::str::from_utf8(&rest[..end]).unwrap_or("/")
 }
 
-fn render_index(motor: &StepperMotor<'_>) -> heapless::String<1536> {
-    let mut html = heapless::String::<1536>::new();
+fn render_index() -> heapless::String<2048> {
+    let position = motor::POSITION.load(Ordering::Relaxed);
+    let busy = motor::BUSY.load(Ordering::Relaxed);
+    let percent = if MAX_TRAVEL_STEPS > 0 {
+        (position as f32 / MAX_TRAVEL_STEPS as f32 * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    // While a move is running, reload the page so the position stays current.
+    let refresh = if busy {
+        "<meta http-equiv=\"refresh\" content=\"1\">"
+    } else {
+        ""
+    };
+    let status = if busy { " — moving" } else { "" };
+
+    let mut html = heapless::String::<2048>::new();
     let _ = write!(
         html,
         "HTTP/1.1 200 OK\r\n\
@@ -78,6 +96,7 @@ fn render_index(motor: &StepperMotor<'_>) -> heapless::String<1536> {
          Connection: close\r\n\r\n\
          <!DOCTYPE html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         {refresh}\
          <title>Valve Controller</title><style>\
          body{{font-family:system-ui,sans-serif;text-align:center;background:#16181d;color:#e8e8ea;margin:0;padding:40px}}\
          h1{{font-weight:600}}h2{{color:#7fd1ff}}\
@@ -87,7 +106,7 @@ fn render_index(motor: &StepperMotor<'_>) -> heapless::String<1536> {
          button.alt{{background:#454a55}}button.alt:hover{{background:#33373f}}\
          </style></head><body>\
          <h1>Throttle Valve Controller</h1>\
-         <h2>Position: {pct:.1}% ({pos} steps)</h2>\
+         <h2>Position: {pct:.1}% ({pos} steps){status}</h2>\
          <p><a href=\"/open\"><button>Open</button></a>\
          <a href=\"/close\"><button>Close</button></a>\
          <a href=\"/home\"><button class=\"alt\">Home</button></a></p>\
@@ -95,8 +114,10 @@ fn render_index(motor: &StepperMotor<'_>) -> heapless::String<1536> {
          <a href=\"/jog-close\"><button>Jog -200</button></a></p>\
          <p><a href=\"/\"><button class=\"alt\">Refresh</button></a></p>\
          </body></html>",
-        pct = motor.percent(),
-        pos = motor.position(),
+        refresh = refresh,
+        pct = percent,
+        pos = position,
+        status = status,
     );
     html
 }
