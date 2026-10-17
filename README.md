@@ -9,7 +9,7 @@ back the current position.
 
 - MCU: RP2350 (Pico 2 W), target `thumbv8m.main-none-eabihf`
 - Wi-Fi: on-board CYW43439
-- Actuator: stepper motor through an external driver (STEP / DIR / ENABLE)
+- Actuator: stepper motor through an external driver (Rorze RD-021M8, STEP / DIR)
 - Position feedback: home/limit switch only (no encoder)
 
 ---
@@ -19,32 +19,38 @@ back the current position.
 | Component | Purpose |
 |---|---|
 | Raspberry Pi Pico 2 W | Control |
-| Stepper driver (TB6600, Rorze RD-021M8, ...) | Power stage |
+| Stepper driver (Rorze RD-021M8) | Power stage |
 | Stepper motor | Valve actuator |
 | Limit switch (normally open) | Homing / reference position |
-| Motor power supply | Motor power (typically 12–48 V) |
+| Motor power supply | 24 V into the driver `VCC` (RD-021M8 range: 10–40 V) |
 | USB cable | Flashing and board logic power |
 
-> Motor power is supplied to the driver from a **separate** power supply.
-> The driver PSU `GND` and the Pico 2 W `GND` **must be connected** — otherwise
-> STEP/DIR/ENABLE will not work.
+> Motor power (24 V) is supplied to the driver from a **separate** power supply
+> and goes only to the driver `VCC`/`GND`. The RD-021M8 clock/direction inputs
+> are **photo-isolated**, so the Pico logic side does not need to share ground
+> with the motor supply — the Pico drives the opto LEDs from its own `+5 V` pin.
 
 ---
 
 ## Pinout
 
-All signals are 3.3 V logic, going from the Pico 2 W to the driver.
+Logic is 3.3 V from the Pico 2 W; the opto anodes of the driver are fed from the
+Pico `+5 V` rail.
 
-| Signal | Pico 2 W GPIO | Pico physical pin | Driver |
+| Signal | Pico 2 W GPIO | Pico physical pin | RD-021M8 terminal |
 |---|---|---|---|
-| STEP | GP2 | 4 | STEP / PUL / CLK |
-| DIR | GP3 | 5 | DIR |
-| ENABLE | GP4 | 6 | ENA (active low) |
+| STEP (clock) | GP2 | 4 | `-CW (CLK)` |
+| DIR (direction) | GP3 | 5 | `-CCW (UD)` |
+| opto anode (common) | +5 V (VBUS) | 40 | `+CW (CLK)` and `+CCW (UD)` |
+| ENABLE | GP4 | 6 | *not used — the RD-021M8 has no enable input* |
 | HOME (limit switch) | GP5 | 7 | — (to GND when triggered) |
-| GND | GND | 3, 8, 13, 18, 23, 28, 33, 38 | GND (logic ground, opto `-`) |
+| GND | GND | 3, 8, 13, 18, 23, 28, 33, 38 | — (opto inputs are isolated; not required) |
 
-`ENABLE` is **active low**: low = motor held (energized), high = motor released.
-This is handled in firmware; no change needed.
+The RD-021M8 clock/direction inputs are **photo-isolated, negative logic**: the
+opto LED conducts when the driven `-` terminal is pulled low by the GPIO. The
+`+CW`/`+CCW` anodes are wired straight to the Pico `+5 V` pin and `-CW`/`-CCW`
+to `GP2`/`GP3` (no series resistors, no transistors — the driver's internal
+resistor limits the LED current to ~12 mA at 5 V).
 
 ### Pins you must NOT use
 
@@ -65,29 +71,35 @@ Free to use (apart from the ones above): GP0–GP22, GP26–GP28.
 ## Wiring diagram
 
 ```
-         Pico 2 W                                  Stepper driver
-       ┌───────────┐                              ┌──────────────────────────┐
-       │           │                              │                          │
-       │  GP2  ────┼──────── STEP ───────────────►│ PUL+ / STEP              │
-       │  GP3  ────┼──────── DIR ────────────────►│ DIR+                     │
-       │  GP4  ────┼──────── ENABLE ─────────────►│ ENA+                     │
-       │           │                              │                          │
-       │  GND  ────┼──────── GND ────────────────►│ PUL- / DIR- / ENA- (GND) │
-       │           │                              │                          │
-       │  GP5  ────┼────┐                         │       A+ A- B+ B- ───────┼──► Motor
-       │           │    │                         │                          │
-       │  GND  ────┼────┴──[ limit switch ]       │   V+ / GND  ◄────────────┼── PSU 12–48 V
-       └───────────┘                              └──────────────────────────┘
+         Pico 2 W                              Rorze RD-021M8
+       ┌───────────┐                            ┌──────────────────────────┐
+       │           │                            │                          │
+       │  GP2  ────┼──── STEP (clock) ─────────►│ -CW  (CLK)               │
+       │  GP3  ────┼──── DIR (direction) ──────►│ -CCW (UD)                │
+       │           │                            │                          │
+       │  +5V  ────┼───────────────────────────►│ +CW  (CLK), +CCW (UD)    │
+       │           │                            │                          │
+       │  GP5  ────┼──┐                         │  A  Ā  B  B̄  ───────────┼──► Motor
+       │           │  │                         │                          │
+       │  GND  ────┼──┴─[ limit switch ]        │  VCC / GND  ◄────────────┼── PSU 24 V
+       └───────────┘                            └──────────────────────────┘
 ```
 
+- `+CW (CLK)` and `+CCW (UD)` are tied together to the Pico `+5 V` pin (common
+  anode). `-CW (CLK)` and `-CCW (UD)` go to `GP2` (STEP) and `GP3` (DIR).
+- No series resistors or transistors are used; the opto LED current is limited
+  by the driver's internal resistor (~270 Ω → ≈12 mA at 5 V).
+- `ENABLE` (GP4) is left unconnected — the RD-021M8 has no enable input and is
+  always energized (it auto-reduces current ~0.3 s after the last step).
+- The RD-021M8 DIP switches must select **1CK** mode, so `CLK` = step and
+  `UD` = direction. Set microstepping with the other DIP switches
+  (OFF/OFF = 1/8, OFF/ON = 1/4, ON/OFF = 1/2, ON/ON = 1/1).
+- Motor current is set by the external resistor on `R-A`/`R-B` (0.1–1.5 A/phase);
+  with no resistor the current is at maximum.
 - The limit switch is wired between **GP5** and **GND**. The internal pull-up to
   3.3 V is enabled (`Pull::Up`), so the line idles at "1" and is pulled to ground
   ("0") when the switch is closed.
-- Connect the driver opto common wires (`PUL-`, `DIR-`, `ENA-`) to the Pico
-  `GND` — this is the logic common (common cathode). If the driver has a
-  dedicated logic `GND` pin, connect it to the Pico `GND` as well.
-- If your driver inputs are common-anode (active "+"), connect the Pico signals
-  to `PUL+/DIR+/ENA+` and tie `PUL-/DIR-/ENA-` to the Pico `GND`.
+- Motor power is 24 V into `VCC` (`DC10-40V`) / `GND`.
 
 > Direction (which way opens vs. closes) is set by the level on `DIR`. If it is
 > inverted, swap any one pair of motor phase wires **or** flip the level in
