@@ -24,14 +24,15 @@ use panic_probe as _;
 use cyw43::aligned_bytes;
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use embassy_executor::Spawner;
-use embassy_net::{Config, Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
+use embassy_net::{Config, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::{bind_interrupts, dma};
 use static_cell::StaticCell;
 
+mod dhcp;
 mod motor;
 mod web;
 
@@ -48,7 +49,16 @@ const MAX_TRAVEL_STEPS: i32 = 20000;
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>;
+    USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
 });
+
+/// Log bridge: everything logged with the `log` facade is printed on the USB
+/// serial port (CDC-ACM), so logs can be viewed on the host with a serial
+/// terminal such as `screen`/`cu`.
+#[embassy_executor::task]
+async fn logger_task(driver: embassy_rp::usb::Driver<'static, USB>) {
+    embassy_usb_logger::run!(4096, log::LevelFilter::Info, driver);
+}
 
 #[embassy_executor::task]
 async fn cyw43_task(
@@ -62,12 +72,22 @@ async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'sta
     runner.run().await
 }
 
+/// Answer DHCP requests from clients that join the AP, so they get an address
+/// automatically instead of needing a static IP.
+#[embassy_executor::task]
+async fn dhcp_task(stack: Stack<'static>, server: Ipv4Address) -> ! {
+    dhcp::run_dhcp_server(stack, server).await
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Universal throttle valve controller starting");
-
     let p = embassy_rp::init(Default::default());
     let mut rng = RoscRng;
+
+    // --- USB serial logging (view with a serial terminal on the host) ---
+    let usb_driver = embassy_rp::usb::Driver::new(p.USB, Irqs);
+    spawner.spawn(unwrap!(logger_task(usb_driver)));
+    log::info!("Universal throttle valve controller starting");
 
     // --- CYW43 Wi-Fi chip (on-board on Pico 2W) ---
     let fw = aligned_bytes!("../cyw43-firmware/43439A0.bin");
@@ -114,7 +134,17 @@ async fn main(spawner: Spawner) {
     spawner.spawn(unwrap!(net_task(runner)));
 
     stack.wait_config_up().await;
-    info!("AP '{}' up at http://192.168.4.1/", AP_SSID);
+    log::info!(
+        "AP '{}' up, static IP {}.{}.{}.{}",
+        AP_SSID,
+        AP_IP[0],
+        AP_IP[1],
+        AP_IP[2],
+        AP_IP[3]
+    );
+
+    let server_ip = Ipv4Address::new(AP_IP[0], AP_IP[1], AP_IP[2], AP_IP[3]);
+    spawner.spawn(unwrap!(dhcp_task(stack, server_ip)));
 
     // --- Stepper motor and home / limit switch ---
     let step_pin = Output::new(p.PIN_2, Level::Low);

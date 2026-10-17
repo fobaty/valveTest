@@ -27,6 +27,7 @@ pub async fn run_web_server<'d>(
         if let Err(_e) = socket.accept(PORT).await {
             continue;
         }
+        log::info!("client connected");
 
         let n = match socket.read(&mut request).await {
             Ok(n) => n,
@@ -46,6 +47,7 @@ pub async fn run_web_server<'d>(
 
 async fn handle_request<'a>(motor: &mut StepperMotor<'a>, home_sensor: &Input<'a>, request: &[u8]) {
     let path = request_path(request);
+    log::info!("request: {}", path);
     match path {
         "/open" => motor.open().await,
         "/close" => motor.close().await,

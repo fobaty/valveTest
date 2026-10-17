@@ -123,7 +123,8 @@ After power-up the board brings up an **open** access point:
 | Board IP | `192.168.4.1` |
 
 Connect to the `ValveController` network from a phone or laptop and open
-**http://192.168.4.1/**.
+**http://192.168.4.1/**. The firmware runs a small DHCP server, so clients get
+an IP address automatically (no static configuration needed).
 
 ### Endpoints
 
@@ -192,6 +193,7 @@ Main parameters live in `src/main.rs`:
 | `src/main.rs` | Init, Wi-Fi AP, actuator pin wiring |
 | `src/motor.rs` | Stepper logic (open/close/home/jog) |
 | `src/web.rs` | HTTP server and web UI |
+| `src/dhcp.rs` | Minimal DHCP server for the AP |
 | `memory.x` | RP2350 memory map and boot block |
 | `build.rs` | Passes `link.x`/`defmt.x` to the linker |
 | `cyw43-firmware/` | CYW43439 Wi-Fi chip firmware |
