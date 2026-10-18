@@ -1,2 +1,4 @@
 /target
 .DS_Store
+firmware.elf
+firmware.uf2

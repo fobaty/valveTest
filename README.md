@@ -5,7 +5,7 @@ Firmware for driving a throttle valve actuator with a stepper motor on a
 
 The board brings up its own Wi-Fi access point and serves a small web UI that
 lets you open/close the valve, run homing, jog the actuator manually, and read
-back the current position.
+back its position, along with real-time indicators for limit switches, motor direction LEDs, and emergency stop handling.
 
 - MCU: RP2350 (Pico 2 W), target `thumbv8m.main-none-eabihf`
 - Wi-Fi: on-board CYW43439
@@ -22,6 +22,8 @@ back the current position.
 | Stepper driver (Rorze RD-021M8) | Power stage |
 | Stepper motor | Valve actuator |
 | Limit switch (normally open) | Homing / reference position |
+| Status LEDs | Limit switch triggered, Open active, Close active |
+| Physical buttons | Open, Close, Home, Jog +, Jog -, Emergency Stop |
 | Motor power supply | 24 V into the driver `VCC` (RD-021M8 range: 10–40 V) |
 | USB cable | Flashing and board logic power |
 
@@ -37,14 +39,22 @@ back the current position.
 Logic is 3.3 V from the Pico 2 W; the opto anodes of the driver are fed from the
 Pico `+5 V` rail.
 
-| Signal | Pico 2 W GPIO | Pico physical pin | RD-021M8 terminal |
+| Signal | Pico 2 W GPIO | Pico physical pin | Description |
 |---|---|---|---|
-| STEP (clock) | GP2 | 4 | `-CW (CLK)` |
-| DIR (direction) | GP3 | 5 | `-CCW (UD)` |
+| STEP (clock) | GP2 | 4 | `-CW (CLK)` driver input |
+| DIR (direction) | GP3 | 5 | `-CCW (UD)` driver input |
+| ENABLE | GP4 | 6 | Driver enable (active low) |
+| HOME (limit switch) | GP5 | 7 | Limit switch input (pulled up, pulls to GND when closed) |
+| Limit switch LED | GP6 | 9 | LED lights up when limit switch is triggered |
+| Open active LED | GP7 | 10 | LED lights up when motor moves / is active in Open direction |
+| Close active LED | GP8 | 11 | LED lights up when motor moves / is active in Close direction |
+| Button: Open | GP9 | 12 | Physical Open button (active low) |
+| Button: Close | GP10 | 14 | Physical Close button (active low) |
+| Button: Home | GP11 | 15 | Physical Home button (active low) |
+| Button: + (Jog Open) | GP12 | 16 | Physical Jog +200 steps button (active low) |
+| Button: - (Jog Close) | GP13 | 17 | Physical Jog -200 steps button (active low) |
+| Button: Emergency Stop | GP14 | 19 | Physical Emergency Stop button (active low) |
 | opto anode (common) | +5 V (VBUS) | 40 | `+CW (CLK)` and `+CCW (UD)` |
-| ENABLE | GP4 | 6 | *not used — the RD-021M8 has no enable input* |
-| HOME (limit switch) | GP5 | 7 | — (to GND when triggered) |
-| GND | GND | 3, 8, 13, 18, 23, 28, 33, 38 | — (opto inputs are isolated; not required) |
 
 The RD-021M8 clock/direction inputs are **photo-isolated, negative logic**: the
 opto LED conducts when the driven `-` terminal is pulled low by the GPIO. The
@@ -64,7 +74,7 @@ broken out:
 | GP25 | CS |
 | GP29 | CLK |
 
-Free to use (apart from the ones above): GP0–GP22, GP26–GP28.
+Free to use (apart from the ones above): GP0, GP1, GP15–GP22, GP26–GP28.
 
 ---
 
@@ -80,17 +90,17 @@ Free to use (apart from the ones above): GP0–GP22, GP26–GP28.
        │  +5V  ────┼───────────────────────────►│ +CW (CLK), +CCW (UD)     │
        │           │                            │                          │
        │  GP5  ────┼──┐                         │  A  Ā  B  B̄ ────────────┼──► Motor
-       │           │  │                         │                          │
-       │  GND  ────┼──┴─[ limit switch ]        │  VCC / GND ◄─────────────┼── PSU 24 V
-       └───────────┘                            └──────────────────────────┘
+       │  GP6  ────┼──┼──[ Limit LED ]          │                          │
+       │  GP7  ────┼──┼──[ Open LED ]           │  VCC / GND ◄─────────────┼── PSU 24 V
+       │  GP8  ────┼──┼──[ Close LED ]          └──────────────────────────┘
+       │  GP9-14 ──┼──┴─[ Physical Buttons (Open, Close, Home, +, -, E-Stop) ]
+       └───────────┘
 ```
 
 - `+CW (CLK)` and `+CCW (UD)` are tied together to the Pico `+5 V` pin (common
   anode). `-CW (CLK)` and `-CCW (UD)` go to `GP2` (STEP) and `GP3` (DIR).
 - No series resistors or transistors are used; the opto LED current is limited
   by the driver's internal resistor (~270 Ω → ≈12 mA at 5 V).
-- `ENABLE` (GP4) is left unconnected — the RD-021M8 has no enable input and is
-  always energized (it auto-reduces current ~0.3 s after the last step).
 - The RD-021M8 DIP switches must select **1CK** mode, so `CLK` = step and
   `UD` = direction. Set microstepping with the other DIP switches
   (OFF/OFF = 1/8, OFF/ON = 1/4, ON/OFF = 1/2, ON/ON = 1/1).
@@ -120,6 +130,7 @@ Free to use (apart from the ones above): GP0–GP22, GP26–GP28.
 - Homing: if the switch is already pressed the motor first backs off, then moves
   slowly towards the closing direction until the switch triggers, after which
   the position counter is zeroed.
+- LED indicator on **GP6** lights up whenever the limit switch is triggered.
 
 ---
 
@@ -138,18 +149,23 @@ Connect to the `ValveController` network from a phone or laptop and open
 **http://192.168.4.1/**. The firmware runs a small DHCP server, so clients get
 an IP address automatically (no static configuration needed).
 
+### Web UI Features
+- Current position (percentage & steps) and motion status.
+- **Limit Switch status indicator** (Triggered / Idle).
+- **Open Active / Close Active LED state indicators**.
+- **Emergency Stop banner & Reset E-Stop button** (immediately halts motor and prevents movement until reset).
+
 ### Endpoints
 
 | Path | Action |
 |---|---|
-| `/` | Page with the current position (refresh) |
+| `/` | Page with status, indicators, and controls |
 | `/open` | Fully open (to `MAX_TRAVEL_STEPS`) |
 | `/close` | Fully close (to 0) |
 | `/home` | Home using the limit switch |
 | `/jog-open` | +200 steps |
 | `/jog-close` | −200 steps |
-
-Position is shown as a percentage and in steps.
+| `/reset-estop` | Clear emergency stop state |
 
 ---
 
@@ -202,9 +218,9 @@ Main parameters live in `src/main.rs`:
 
 | File | Purpose |
 |---|---|
-| `src/main.rs` | Init, Wi-Fi AP, actuator pin wiring |
-| `src/motor.rs` | Stepper logic (open/close/home/jog) |
-| `src/web.rs` | HTTP server and web UI |
+| `src/main.rs` | Init, Wi-Fi AP, pin wiring, sensors & buttons tasks |
+| `src/motor.rs` | Stepper logic (open/close/home/jog, LED updates, E-stop) |
+| `src/web.rs` | HTTP server, web UI with indicators and E-stop controls |
 | `src/dhcp.rs` | Minimal DHCP server for the AP |
 | `memory.x` | RP2350 memory map and boot block |
 | `build.rs` | Passes `link.x`/`defmt.x` to the linker |

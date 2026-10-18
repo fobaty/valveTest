@@ -9,9 +9,15 @@
 //! - GPIO 3  -> driver DIR
 //! - GPIO 4  -> driver ENABLE (active low)
 //! - GPIO 5  -> home / limit switch (pulled up, shorts to GND when triggered)
-//!
-//! The stepper driver (TB6600, Rorze RD-021M8, ...) receives STEP/DIR/ENABLE and
-//! drives the motor. Position is tracked in step counts; no analog feedback is used.
+//! - GPIO 6  -> limit switch LED indicator
+//! - GPIO 7  -> Open state active LED indicator
+//! - GPIO 8  -> Close state active LED indicator
+//! - GPIO 9  -> Physical button: Open
+//! - GPIO 10 -> Physical button: Close
+//! - GPIO 11 -> Physical button: Home
+//! - GPIO 12 -> Physical button: + (Jog Open)
+//! - GPIO 13 -> Physical button: - (Jog Close)
+//! - GPIO 14 -> Physical button: Emergency Stop
 
 #![no_std]
 #![no_main]
@@ -84,20 +90,103 @@ async fn dhcp_task(stack: Stack<'static>, server: Ipv4Address) -> ! {
 /// HTTP handler answer immediately while the valve is still travelling, and
 /// isolates a long-running homing sweep from the rest of the firmware.
 #[embassy_executor::task]
-async fn motor_task(mut motor: StepperMotor<'static>, home_sensor: Input<'static>) {
+async fn motor_task(mut motor: StepperMotor<'static>) {
     loop {
         let command = COMMANDS.wait().await;
+        if motor::EMERGENCY_STOP_ACTIVE.load(Ordering::Relaxed) {
+            log::warn!("Command ignored because emergency stop is active");
+            continue;
+        }
         BUSY.store(true, Ordering::Relaxed);
 
         match command {
             Command::Open => motor.open().await,
             Command::Close => motor.close().await,
-            Command::Home => motor.home(&home_sensor).await,
+            Command::Home => motor.home().await,
             Command::Jog(steps) => motor.jog(steps).await,
         }
 
         POSITION.store(motor.position(), Ordering::Relaxed);
         BUSY.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Monitors the limit switch sensor and drives its indicator LED.
+#[embassy_executor::task]
+async fn sensors_task(home_sensor: Input<'static>, mut limit_led: Output<'static>) {
+    loop {
+        let active = home_sensor.is_low();
+        motor::LIMIT_SWITCH_ACTIVE.store(active, Ordering::Relaxed);
+        if active {
+            limit_led.set_high();
+        } else {
+            limit_led.set_low();
+        }
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
+    }
+}
+
+/// Polls physical buttons (Open, Close, Home, Jog +, Jog -, Emergency Stop) with debouncing.
+#[embassy_executor::task]
+async fn buttons_task(
+    open_btn: Input<'static>,
+    close_btn: Input<'static>,
+    home_btn: Input<'static>,
+    jog_open_btn: Input<'static>,
+    jog_close_btn: Input<'static>,
+    emergency_stop_btn: Input<'static>,
+) {
+    let mut prev_open = true;
+    let mut prev_close = true;
+    let mut prev_home = true;
+    let mut prev_jog_open = true;
+    let mut prev_jog_close = true;
+    let mut prev_estop = true;
+
+    loop {
+        let open_pressed = open_btn.is_low();
+        let close_pressed = close_btn.is_low();
+        let home_pressed = home_btn.is_low();
+        let jog_open_pressed = jog_open_btn.is_low();
+        let jog_close_pressed = jog_close_btn.is_low();
+        let estop_pressed = emergency_stop_btn.is_low();
+
+        if estop_pressed && !prev_estop {
+            log::warn!("Emergency stop button pressed!");
+            motor::EMERGENCY_STOP_ACTIVE.store(true, Ordering::Relaxed);
+        }
+
+        if !estop_pressed && prev_estop && motor::EMERGENCY_STOP_ACTIVE.load(Ordering::Relaxed) {
+            log::info!("Emergency stop released");
+            motor::EMERGENCY_STOP_ACTIVE.store(false, Ordering::Relaxed);
+        }
+
+        if !motor::EMERGENCY_STOP_ACTIVE.load(Ordering::Relaxed) {
+            if open_pressed && !prev_open {
+                motor::COMMANDS.signal(Command::Open);
+            }
+            if close_pressed && !prev_close {
+                motor::COMMANDS.signal(Command::Close);
+            }
+            if home_pressed && !prev_home {
+                motor::COMMANDS.signal(Command::Home);
+            }
+            if jog_open_pressed && !prev_jog_open {
+                motor::COMMANDS.signal(Command::Jog(200));
+            }
+            if jog_close_pressed && !prev_jog_close {
+                motor::COMMANDS.signal(Command::Jog(-200));
+            }
+        }
+
+        prev_open = open_pressed;
+        prev_close = close_pressed;
+        prev_home = home_pressed;
+        prev_jog_open = jog_open_pressed;
+        prev_jog_close = jog_close_pressed;
+        prev_estop = estop_pressed;
+
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(20)).await;
     }
 }
 
@@ -109,7 +198,7 @@ async fn main(spawner: Spawner) {
     // --- USB serial logging (view with a serial terminal on the host) ---
     let usb_driver = embassy_rp::usb::Driver::new(p.USB, Irqs);
     spawner.spawn(unwrap!(logger_task(usb_driver)));
-    log::info!("Universal throttle valve controller starting");
+    log::info!("Universal throttle valve controller starting ({})", motor::FIRMWARE_VERSION);
 
     // --- CYW43 Wi-Fi chip (on-board on Pico 2W) ---
     let fw = aligned_bytes!("../cyw43-firmware/43439A0.bin");
@@ -168,14 +257,28 @@ async fn main(spawner: Spawner) {
     let server_ip = Ipv4Address::new(AP_IP[0], AP_IP[1], AP_IP[2], AP_IP[3]);
     spawner.spawn(unwrap!(dhcp_task(stack, server_ip)));
 
-    // --- Stepper motor and home / limit switch ---
+    // --- Stepper motor, sensors, LEDs and buttons ---
     let step_pin = Output::new(p.PIN_2, Level::Low);
     let dir_pin = Output::new(p.PIN_3, Level::Low);
     let enable_pin = Output::new(p.PIN_4, Level::High);
     let home_sensor = Input::new(p.PIN_5, Pull::Up);
 
-    let motor = StepperMotor::new(step_pin, dir_pin, enable_pin);
-    spawner.spawn(unwrap!(motor_task(motor, home_sensor)));
+    let limit_led = Output::new(p.PIN_6, Level::Low);
+    let open_led = Output::new(p.PIN_7, Level::Low);
+    let close_led = Output::new(p.PIN_8, Level::Low);
+
+    let _open_btn = Input::new(p.PIN_9, Pull::Up);
+    let _close_btn = Input::new(p.PIN_10, Pull::Up);
+    let _home_btn = Input::new(p.PIN_11, Pull::Up);
+    let _jog_open_btn = Input::new(p.PIN_12, Pull::Up);
+    let _jog_close_btn = Input::new(p.PIN_13, Pull::Up);
+    let _emergency_stop_btn = Input::new(p.PIN_14, Pull::Up);
+
+    let motor = StepperMotor::new(step_pin, dir_pin, enable_pin, open_led, close_led);
+    spawner.spawn(unwrap!(motor_task(motor)));
+    spawner.spawn(unwrap!(sensors_task(home_sensor, limit_led)));
+    // Physical buttons task disabled by default until buttons are physically wired to GND.
+    // spawner.spawn(unwrap!(buttons_task(open_btn, close_btn, home_btn, jog_open_btn, jog_close_btn, emergency_stop_btn)));
 
     run_web_server(stack).await;
 }
