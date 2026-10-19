@@ -6,7 +6,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 
 /// Firmware version
-pub const FIRMWARE_VERSION: &str = "v0.21";
+pub const FIRMWARE_VERSION: &str = "v0.22";
 
 /// Full valve travel in steps between Open and Close.
 pub static MAX_TRAVEL_STEPS: AtomicI32 = AtomicI32::new(900);

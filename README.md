@@ -1,4 +1,4 @@
-# Universal Throttle Valve Controller
+# Step Motor Tester
 
 Firmware for driving a throttle valve actuator with a stepper motor on a
 **Raspberry Pi Pico 2 W (RP2350)**.
@@ -140,12 +140,12 @@ After power-up the board brings up an **open** access point:
 
 | Parameter | Value |
 |---|---|
-| SSID | `ValveController` |
+| SSID | `StepMotorTester` |
 | Channel | 6 |
 | Password | — (open network) |
 | Board IP | `192.168.4.1` |
 
-Connect to the `ValveController` network from a phone or laptop and open
+Connect to the `StepMotorTester` network from a phone or laptop and open
 **http://192.168.4.1/**. The firmware runs a small DHCP server, so clients get
 an IP address automatically (no static configuration needed).
 
@@ -154,6 +154,7 @@ an IP address automatically (no static configuration needed).
 - **Limit Switch status indicator** (Triggered / Idle).
 - **Open Active / Close Active LED state indicators**.
 - **Emergency Stop banner & Reset E-Stop button** (immediately halts motor and prevents movement until reset).
+- **Motor & Travel Settings** (max steps lock, max steps, steps/deg, gearbox ratio) are written to the on-board flash on **Save Settings** and restored automatically after power-up.
 
 ### Endpoints
 
@@ -187,7 +188,7 @@ Alternative — flash over USB (BOOTSEL):
 
 ```bash
 # produce a UF2 (needs elf2uf2 / picotool)
-picotool uf2 convert target/thumbv8m.main-none-eabihf/release/throttle-valve-controller out.uf2
+picotool uf2 convert target/thumbv8m.main-none-eabihf/release/step-motor-tester out.uf2
 # then: hold BOOTSEL, plug in USB, copy out.uf2 to the RPI-RP2 drive
 ```
 
@@ -201,7 +202,7 @@ Main parameters live in `src/main.rs`:
 
 | Constant | Purpose | Default |
 |---|---|---|
-| `AP_SSID` | Access point name | `ValveController` |
+| `AP_SSID` | Access point name | `StepMotorTester` |
 | `AP_CHANNEL` | Wi-Fi channel | `6` |
 | `AP_IP` | Board IP address | `192.168.4.1` |
 | `MAX_TRAVEL_STEPS` | Full valve travel in steps | `20000` |

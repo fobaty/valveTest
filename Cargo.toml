@@ -1,8 +1,8 @@
 [package]
-name = "throttle-valve-controller"
+name = "step-motor-tester"
 version = "0.1.0"
 edition = "2021"
-description = "Universal stepper-driven throttle valve controller with Wi-Fi AP and web UI (RP2350 / Pico 2W)"
+description = "Stepper-driven valve/step motor tester with Wi-Fi AP, web UI and persistent settings (RP2350 / Pico 2W)"
 
 [dependencies]
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }

@@ -7,6 +7,7 @@ use embassy_time::{Duration, Timer};
 use embedded_io_async::Write as _;
 
 use crate::motor::{self, Command};
+use crate::settings::{self, Settings};
 
 const PORT: u16 = 80;
 
@@ -79,6 +80,8 @@ fn handle_request(request: &[u8]) {
         }
         let en = parse_query_param(path, "en").unwrap_or(0) == 1;
         motor::MAX_STEPS_ENABLED.store(en, Ordering::Relaxed);
+        // Persist the resulting configuration so it survives a power cycle.
+        settings::save(Settings::current());
     } else {
         let command = match path {
             "/open" => Some(Command::Open),
@@ -180,7 +183,7 @@ fn render_index() -> heapless::String<8192> {
          <!DOCTYPE html><html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          {refresh}\
-         <title>Valve Controller</title><style>\
+         <title>Step Motor Tester</title><style>\
          body{{font-family:system-ui,sans-serif;text-align:center;background:#16181d;color:#e8e8ea;margin:0;padding:20px}}\
          h1{{font-weight:600}}h2{{color:#7fd1ff}}\
          a{{text-decoration:none}}\
@@ -193,7 +196,7 @@ fn render_index() -> heapless::String<8192> {
          th,td{{padding:6px 8px;border-bottom:1px solid #333;text-align:left}}\
          input{{padding:8px;margin:4px;border-radius:6px;border:1px solid #444;background:#16181d;color:#fff}}\
          </style></head><body>\
-         <h1>Throttle Valve Controller <span style=\"font-size:14px;color:#7fd1ff\">{version}</span></h1>\
+         <h1>Step Motor Tester <span style=\"font-size:14px;color:#7fd1ff\">{version}</span></h1>\
          {estop_section}\
          <h2>Position: {pct:.1}% ({deg:.1}°, {pos} steps){status}</h2>\
          <div class=\"card\">\

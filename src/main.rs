@@ -1,4 +1,4 @@
-//! # Universal Throttle Valve Controller
+//! # Step Motor Tester
 //!
 //! Firmware for a stepper-driven throttle valve on a Raspberry Pi Pico 2W (RP2350).
 //! The board brings up a Wi-Fi access point and serves a small web UI to open,
@@ -34,6 +34,7 @@ use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use embassy_executor::Spawner;
 use embassy_net::{Config, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
 use embassy_rp::clocks::RoscRng;
+use embassy_rp::flash::Flash;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
@@ -42,12 +43,13 @@ use static_cell::StaticCell;
 
 mod dhcp;
 mod motor;
+mod settings;
 mod web;
 
 use motor::{Command, StepperMotor, BUSY, COMMANDS, POSITION};
 use web::run_web_server;
 
-const AP_SSID: &str = "ValveController";
+const AP_SSID: &str = "StepMotorTester";
 const AP_CHANNEL: u8 = 6;
 const AP_IP: [u8; 4] = [192, 168, 4, 1];
 
@@ -198,7 +200,20 @@ async fn main(spawner: Spawner) {
     // --- USB serial logging (view with a serial terminal on the host) ---
     let usb_driver = embassy_rp::usb::Driver::new(p.USB, Irqs);
     spawner.spawn(unwrap!(logger_task(usb_driver)));
-    log::info!("Universal throttle valve controller starting ({})", motor::FIRMWARE_VERSION);
+    log::info!("Step motor tester starting ({})", motor::FIRMWARE_VERSION);
+
+    // --- Persistent settings in the on-board flash ---
+    // Restore the travel configuration saved by the web UI (if any) before the
+    // motor and web tasks start, so the limits are correct from the first move.
+    let flash: settings::SettingsFlash = Flash::new_blocking(p.FLASH);
+    settings::register(flash);
+    match settings::load() {
+        Some(saved) => {
+            saved.apply();
+            log::info!("restored settings from flash");
+        }
+        None => log::info!("no stored settings, using defaults"),
+    }
 
     // --- CYW43 Wi-Fi chip (on-board on Pico 2W) ---
     let fw = aligned_bytes!("../cyw43-firmware/43439A0.bin");
